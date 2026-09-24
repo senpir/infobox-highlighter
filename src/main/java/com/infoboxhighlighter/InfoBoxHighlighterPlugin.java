@@ -4,6 +4,8 @@ import com.google.inject.Provides;
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -14,6 +16,7 @@ import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import net.runelite.api.Client;
 import net.runelite.api.MenuAction;
+import net.runelite.api.events.ClientTick;
 import net.runelite.api.events.GameTick;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.config.RuneLiteConfig;
@@ -27,6 +30,7 @@ import net.runelite.client.ui.components.colorpicker.RuneliteColorPicker;
 import net.runelite.client.ui.overlay.OverlayMenuEntry;
 import net.runelite.client.ui.overlay.infobox.InfoBox;
 import net.runelite.client.ui.overlay.infobox.InfoBoxManager;
+import net.runelite.client.ui.overlay.infobox.Timer;
 
 @PluginDescriptor(
         name = "InfoBox Highlighter",
@@ -38,7 +42,13 @@ public class InfoBoxHighlighterPlugin extends Plugin
 
     private static final String SET_HIGHLIGHT = "Set highlight";
     private static final String REMOVE_HIGHLIGHT = "Remove highlight";
+
+    private static final String SET_FLASH_COLOR = "Set flash color";
+    private static final String REMOVE_FLASH_COLOR = "Remove flash color";
+
     private static final String MENU_TARGET = "InfoBox";
+
+    private static final long FLASH_PULSE_STEP_MS = 180L;
 
     @Inject
     private Client client;
@@ -65,6 +75,9 @@ public class InfoBoxHighlighterPlugin extends Plugin
             new IdentityHashMap<>();
 
     private final Map<InfoBox, Color> appliedColors =
+            new IdentityHashMap<>();
+
+    private final Map<InfoBox, Integer> appliedFeathers =
             new IdentityHashMap<>();
 
     @Provides
@@ -96,6 +109,7 @@ public class InfoBoxHighlighterPlugin extends Plugin
         originalImages.clear();
         highlightedImages.clear();
         appliedColors.clear();
+        appliedFeathers.clear();
     }
 
     @Subscribe
@@ -103,6 +117,18 @@ public class InfoBoxHighlighterPlugin extends Plugin
     {
         syncInfoBoxMenus();
         syncHighlightImages();
+    }
+
+    @Subscribe
+    public void onClientTick(ClientTick event)
+    {
+        for (InfoBox infoBox : infoBoxManager.getInfoBoxes())
+        {
+            if (infoBox instanceof Timer && getFlashColor(infoBox) != null)
+            {
+                syncHighlightImage(infoBox);
+            }
+        }
     }
 
     @Subscribe
@@ -114,9 +140,12 @@ public class InfoBoxHighlighterPlugin extends Plugin
         }
 
         if ("borderWidth".equals(event.getKey())
-                || "feather".equals(event.getKey()))
+                || "feather".equals(event.getKey())
+                || "flashThreshold".equals(event.getKey())
+                || "flashIntensity".equals(event.getKey()))
         {
             appliedColors.clear();
+            appliedFeathers.clear();
         }
     }
 
@@ -128,11 +157,19 @@ public class InfoBoxHighlighterPlugin extends Plugin
 
         if (SET_HIGHLIGHT.equals(option))
         {
-            openColorPicker(infoBox);
+            openHighlightColorPicker(infoBox);
         }
         else if (REMOVE_HIGHLIGHT.equals(option))
         {
             removeHighlight(infoBox);
+        }
+        else if (SET_FLASH_COLOR.equals(option))
+        {
+            openFlashColorPicker(infoBox);
+        }
+        else if (REMOVE_FLASH_COLOR.equals(option))
+        {
+            removeFlashColor(infoBox);
         }
     }
 
@@ -140,38 +177,79 @@ public class InfoBoxHighlighterPlugin extends Plugin
     {
         for (InfoBox infoBox : infoBoxManager.getInfoBoxes())
         {
-            if (!hasMenuEntry(infoBox, SET_HIGHLIGHT))
+            syncHighlightMenu(infoBox);
+            syncFlashMenu(infoBox);
+        }
+    }
+
+    private void syncHighlightMenu(InfoBox infoBox)
+    {
+        if (!hasMenuEntry(infoBox, SET_HIGHLIGHT))
+        {
+            infoBox.getMenuEntries().add(
+                    new OverlayMenuEntry(
+                            MenuAction.RUNELITE_INFOBOX,
+                            SET_HIGHLIGHT,
+                            MENU_TARGET
+                    )
+            );
+        }
+
+        if (getHighlightColor(infoBox) != null)
+        {
+            if (!hasMenuEntry(infoBox, REMOVE_HIGHLIGHT))
             {
                 infoBox.getMenuEntries().add(
                         new OverlayMenuEntry(
                                 MenuAction.RUNELITE_INFOBOX,
-                                SET_HIGHLIGHT,
+                                REMOVE_HIGHLIGHT,
                                 MENU_TARGET
                         )
                 );
             }
+        }
+        else
+        {
+            removeMenuEntry(infoBox, REMOVE_HIGHLIGHT);
+        }
+    }
 
-            Color highlightColor = getHighlightColor(infoBox);
+    private void syncFlashMenu(InfoBox infoBox)
+    {
+        if (!(infoBox instanceof Timer))
+        {
+            removeMenuEntry(infoBox, SET_FLASH_COLOR);
+            removeMenuEntry(infoBox, REMOVE_FLASH_COLOR);
+            return;
+        }
 
-            if (highlightColor != null)
+        if (!hasMenuEntry(infoBox, SET_FLASH_COLOR))
+        {
+            infoBox.getMenuEntries().add(
+                    new OverlayMenuEntry(
+                            MenuAction.RUNELITE_INFOBOX,
+                            SET_FLASH_COLOR,
+                            MENU_TARGET
+                    )
+            );
+        }
+
+        if (getFlashColor(infoBox) != null)
+        {
+            if (!hasMenuEntry(infoBox, REMOVE_FLASH_COLOR))
             {
-                if (!hasMenuEntry(infoBox, REMOVE_HIGHLIGHT))
-                {
-                    infoBox.getMenuEntries().add(
-                            new OverlayMenuEntry(
-                                    MenuAction.RUNELITE_INFOBOX,
-                                    REMOVE_HIGHLIGHT,
-                                    MENU_TARGET
-                            )
-                    );
-                }
-            }
-            else
-            {
-                infoBox.getMenuEntries().removeIf(
-                        entry -> REMOVE_HIGHLIGHT.equals(entry.getOption())
+                infoBox.getMenuEntries().add(
+                        new OverlayMenuEntry(
+                                MenuAction.RUNELITE_INFOBOX,
+                                REMOVE_FLASH_COLOR,
+                                MENU_TARGET
+                        )
                 );
             }
+        }
+        else
+        {
+            removeMenuEntry(infoBox, REMOVE_FLASH_COLOR);
         }
     }
 
@@ -196,6 +274,10 @@ public class InfoBoxHighlighterPlugin extends Plugin
                 infoBox -> !activeInfoBoxes.contains(infoBox)
         );
 
+        appliedFeathers.keySet().removeIf(
+                infoBox -> !activeInfoBoxes.contains(infoBox)
+        );
+
         for (InfoBox infoBox : infoBoxes)
         {
             syncHighlightImage(infoBox);
@@ -204,7 +286,8 @@ public class InfoBoxHighlighterPlugin extends Plugin
 
     private void syncHighlightImage(InfoBox infoBox)
     {
-        Color desiredColor = getHighlightColor(infoBox);
+        Color desiredColor = getEffectiveColor(infoBox);
+        int desiredFeather = getEffectiveFeather(infoBox);
 
         BufferedImage currentImage = infoBox.getImage();
         BufferedImage highlightedImage = highlightedImages.get(infoBox);
@@ -220,6 +303,7 @@ public class InfoBoxHighlighterPlugin extends Plugin
                 originalImages.remove(infoBox);
                 highlightedImages.remove(infoBox);
                 appliedColors.remove(infoBox);
+                appliedFeathers.remove(infoBox);
             }
 
             return;
@@ -228,43 +312,173 @@ public class InfoBoxHighlighterPlugin extends Plugin
         if (highlightedImage == null)
         {
             originalImages.put(infoBox, currentImage);
-            applyHighlightImage(infoBox, desiredColor);
+
+            applyHighlightImage(
+                    infoBox,
+                    desiredColor,
+                    desiredFeather
+            );
+
             return;
         }
 
         if (currentImage != highlightedImage)
         {
             originalImages.put(infoBox, currentImage);
-            applyHighlightImage(infoBox, desiredColor);
+
+            applyHighlightImage(
+                    infoBox,
+                    desiredColor,
+                    desiredFeather
+            );
+
             return;
         }
 
         Color appliedColor = appliedColors.get(infoBox);
+        Integer appliedFeather = appliedFeathers.get(infoBox);
 
-        if (!desiredColor.equals(appliedColor))
+        if (!desiredColor.equals(appliedColor)
+                || appliedFeather == null
+                || desiredFeather != appliedFeather)
         {
-            applyHighlightImage(infoBox, desiredColor);
+            applyHighlightImage(
+                    infoBox,
+                    desiredColor,
+                    desiredFeather
+            );
         }
     }
 
-    private void applyHighlightImage(InfoBox infoBox, Color color)
+    private Color getEffectiveColor(InfoBox infoBox)
     {
-        BufferedImage originalImage = originalImages.get(infoBox);
+        if (isFlashActive(infoBox))
+        {
+            return getFlashColor(infoBox);
+        }
+
+        return getHighlightColor(infoBox);
+    }
+
+    private int getEffectiveFeather(InfoBox infoBox)
+    {
+        if (isFlashActive(infoBox))
+        {
+            return getPulseFeather();
+        }
+
+        return config.feather();
+    }
+
+    private boolean isFlashActive(InfoBox infoBox)
+    {
+        if (!(infoBox instanceof Timer))
+        {
+            return false;
+        }
+
+        Color flashColor = getFlashColor(infoBox);
+
+        if (flashColor == null)
+        {
+            return false;
+        }
+
+        Timer timer = (Timer) infoBox;
+        Instant endTime = timer.getEndTime();
+
+        if (endTime == null)
+        {
+            return false;
+        }
+
+        long remainingMillis =
+                Duration.between(Instant.now(), endTime).toMillis();
+
+        long thresholdMillis =
+                config.flashThreshold() * 1000L;
+
+        return remainingMillis > 0
+                && remainingMillis <= thresholdMillis;
+    }
+
+    private int getPulseFeather()
+    {
+        int baseFeather = Math.max(
+                0,
+                config.feather()
+        );
+
+        int maxFeather = Math.min(
+                8,
+                baseFeather + config.flashIntensity()
+        );
+
+        int range =
+                maxFeather - baseFeather;
+
+        if (range <= 0)
+        {
+            return baseFeather;
+        }
+
+        int cycleLength =
+                range * 2;
+
+        long step = Math.floorMod(
+                System.currentTimeMillis() / FLASH_PULSE_STEP_MS,
+                cycleLength
+        );
+
+        int offset;
+
+        if (step <= range)
+        {
+            offset = (int) step;
+        }
+        else
+        {
+            offset =
+                    cycleLength - (int) step;
+        }
+
+        return baseFeather + offset;
+    }
+
+    private void applyHighlightImage(
+            InfoBox infoBox,
+            Color color,
+            int feather)
+    {
+        BufferedImage originalImage =
+                originalImages.get(infoBox);
 
         if (originalImage == null)
         {
             return;
         }
 
-        int size = Math.max(2, runeLiteConfig.infoBoxSize());
+        int size =
+                Math.max(
+                        2,
+                        runeLiteConfig.infoBoxSize()
+                );
 
         BufferedImage highlightedImage =
-                new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+                new BufferedImage(
+                        size,
+                        size,
+                        BufferedImage.TYPE_INT_ARGB
+                );
 
-        Graphics2D graphics = highlightedImage.createGraphics();
+        Graphics2D graphics =
+                highlightedImage.createGraphics();
 
-        int imageWidth = originalImage.getWidth();
-        int imageHeight = originalImage.getHeight();
+        int imageWidth =
+                originalImage.getWidth();
+
+        int imageHeight =
+                originalImage.getHeight();
 
         double scale = Math.min(
                 1.0,
@@ -276,16 +490,23 @@ public class InfoBoxHighlighterPlugin extends Plugin
 
         int drawWidth = Math.max(
                 1,
-                (int) Math.round(imageWidth * scale)
+                (int) Math.round(
+                        imageWidth * scale
+                )
         );
 
         int drawHeight = Math.max(
                 1,
-                (int) Math.round(imageHeight * scale)
+                (int) Math.round(
+                        imageHeight * scale
+                )
         );
 
-        int imageX = (size - drawWidth) / 2;
-        int imageY = (size - drawHeight) / 2;
+        int imageX =
+                (size - drawWidth) / 2;
+
+        int imageY =
+                (size - drawHeight) / 2;
 
         graphics.drawImage(
                 originalImage,
@@ -298,7 +519,10 @@ public class InfoBoxHighlighterPlugin extends Plugin
 
         int borderWidth = Math.max(
                 1,
-                Math.min(config.borderWidth(), size / 2)
+                Math.min(
+                        config.borderWidth(),
+                        size / 2
+                )
         );
 
         drawBorderLayer(
@@ -309,11 +533,16 @@ public class InfoBoxHighlighterPlugin extends Plugin
                 color
         );
 
-        int feather = config.feather();
+        int featherAmount =
+                Math.max(
+                        0,
+                        feather
+                );
 
-        for (int i = 0; i < feather; i++)
+        for (int i = 0; i < featherAmount; i++)
         {
-            int offset = borderWidth + i;
+            int offset =
+                    borderWidth + i;
 
             if ((offset * 2) >= size)
             {
@@ -321,19 +550,23 @@ public class InfoBoxHighlighterPlugin extends Plugin
             }
 
             double strength =
-                    (double) (feather - i) / (feather + 1);
+                    (double) (featherAmount - i)
+                            / (featherAmount + 1);
 
             int alpha = Math.max(
                     1,
-                    (int) Math.round(color.getAlpha() * strength)
+                    (int) Math.round(
+                            color.getAlpha() * strength
+                    )
             );
 
-            Color featherColor = new Color(
-                    color.getRed(),
-                    color.getGreen(),
-                    color.getBlue(),
-                    alpha
-            );
+            Color featherColor =
+                    new Color(
+                            color.getRed(),
+                            color.getGreen(),
+                            color.getBlue(),
+                            alpha
+                    );
 
             drawBorderLayer(
                     graphics,
@@ -346,11 +579,28 @@ public class InfoBoxHighlighterPlugin extends Plugin
 
         graphics.dispose();
 
-        infoBox.setImage(highlightedImage);
-        infoBoxManager.updateInfoBoxImage(infoBox);
+        infoBox.setImage(
+                highlightedImage
+        );
 
-        highlightedImages.put(infoBox, highlightedImage);
-        appliedColors.put(infoBox, color);
+        infoBoxManager.updateInfoBoxImage(
+                infoBox
+        );
+
+        highlightedImages.put(
+                infoBox,
+                highlightedImage
+        );
+
+        appliedColors.put(
+                infoBox,
+                color
+        );
+
+        appliedFeathers.put(
+                infoBox,
+                featherAmount
+        );
     }
 
     private void drawBorderLayer(
@@ -360,19 +610,26 @@ public class InfoBoxHighlighterPlugin extends Plugin
             int thickness,
             Color color)
     {
-        int innerSize = size - (offset * 2);
+        int innerSize =
+                size - (offset * 2);
 
-        if (innerSize <= 0 || thickness <= 0)
+        if (innerSize <= 0
+                || thickness <= 0)
         {
             return;
         }
 
         int actualThickness = Math.min(
                 thickness,
-                Math.max(1, innerSize / 2)
+                Math.max(
+                        1,
+                        innerSize / 2
+                )
         );
 
-        graphics.setColor(color);
+        graphics.setColor(
+                color
+        );
 
         graphics.fillRect(
                 offset,
@@ -409,98 +666,254 @@ public class InfoBoxHighlighterPlugin extends Plugin
         }
     }
 
-    private void restoreOriginalImage(InfoBox infoBox)
+    private void restoreOriginalImage(
+            InfoBox infoBox)
     {
-        BufferedImage originalImage = originalImages.remove(infoBox);
-        BufferedImage highlightedImage = highlightedImages.remove(infoBox);
+        BufferedImage originalImage =
+                originalImages.remove(infoBox);
+
+        BufferedImage highlightedImage =
+                highlightedImages.remove(infoBox);
 
         appliedColors.remove(infoBox);
+        appliedFeathers.remove(infoBox);
 
         if (originalImage == null)
         {
             return;
         }
 
-        if (highlightedImage == null || infoBox.getImage() == highlightedImage)
+        if (highlightedImage == null
+                || infoBox.getImage() == highlightedImage)
         {
-            infoBox.setImage(originalImage);
-            infoBoxManager.updateInfoBoxImage(infoBox);
+            infoBox.setImage(
+                    originalImage
+            );
+
+            infoBoxManager.updateInfoBoxImage(
+                    infoBox
+            );
         }
     }
 
-    private boolean hasMenuEntry(InfoBox infoBox, String option)
+    private boolean hasMenuEntry(
+            InfoBox infoBox,
+            String option)
     {
         return infoBox.getMenuEntries()
                 .stream()
-                .anyMatch(entry -> option.equals(entry.getOption()));
+                .anyMatch(
+                        entry ->
+                                option.equals(
+                                        entry.getOption()
+                                )
+                );
     }
 
-    private void removeOurMenuEntries(InfoBox infoBox)
+    private void removeMenuEntry(
+            InfoBox infoBox,
+            String option)
     {
-        infoBox.getMenuEntries().removeIf(entry ->
-                SET_HIGHLIGHT.equals(entry.getOption())
-                        || REMOVE_HIGHLIGHT.equals(entry.getOption())
-        );
+        infoBox.getMenuEntries()
+                .removeIf(
+                        entry ->
+                                option.equals(
+                                        entry.getOption()
+                                )
+                );
     }
 
-    private void openColorPicker(InfoBox infoBox)
+    private void removeOurMenuEntries(
+            InfoBox infoBox)
     {
-        Color currentColor = getHighlightColor(infoBox);
+        infoBox.getMenuEntries()
+                .removeIf(entry ->
+                        SET_HIGHLIGHT.equals(
+                                entry.getOption()
+                        )
+                                || REMOVE_HIGHLIGHT.equals(
+                                entry.getOption()
+                        )
+                                || SET_FLASH_COLOR.equals(
+                                entry.getOption()
+                        )
+                                || REMOVE_FLASH_COLOR.equals(
+                                entry.getOption()
+                        )
+                );
+    }
+
+    private void openHighlightColorPicker(
+            InfoBox infoBox)
+    {
+        Color currentColor =
+                getHighlightColor(infoBox);
 
         if (currentColor == null)
         {
-            currentColor = Color.YELLOW;
+            currentColor =
+                    Color.YELLOW;
         }
 
-        final Color startingColor = currentColor;
+        openColorPicker(
+                infoBox,
+                currentColor,
+                "InfoBox Highlight",
+                false
+        );
+    }
 
+    private void openFlashColorPicker(
+            InfoBox infoBox)
+    {
+        Color currentColor =
+                getFlashColor(infoBox);
+
+        if (currentColor == null)
+        {
+            currentColor =
+                    Color.RED;
+        }
+
+        openColorPicker(
+                infoBox,
+                currentColor,
+                "InfoBox Flash",
+                true
+        );
+    }
+
+    private void openColorPicker(
+            InfoBox infoBox,
+            Color startingColor,
+            String title,
+            boolean flashColor)
+    {
         SwingUtilities.invokeLater(() ->
         {
-            RuneliteColorPicker colorPicker = colorPickerManager.create(
-                    client,
-                    startingColor,
-                    "InfoBox Highlight",
-                    false
-            );
+            RuneliteColorPicker colorPicker =
+                    colorPickerManager.create(
+                            client,
+                            startingColor,
+                            title,
+                            false
+                    );
 
             colorPicker.setOnClose(color ->
-                    setHighlightColor(infoBox, color)
-            );
+            {
+                if (flashColor)
+                {
+                    setFlashColor(
+                            infoBox,
+                            color
+                    );
+                }
+                else
+                {
+                    setHighlightColor(
+                            infoBox,
+                            color
+                    );
+                }
+            });
 
-            colorPicker.setVisible(true);
+            colorPicker.setVisible(
+                    true
+            );
         });
     }
 
-    private Color getHighlightColor(InfoBox infoBox)
+    private Color getHighlightColor(
+            InfoBox infoBox)
     {
         return configManager.getConfiguration(
                 CONFIG_GROUP,
-                getColorConfigKey(infoBox),
+                getHighlightColorConfigKey(
+                        infoBox
+                ),
                 Color.class
         );
     }
 
-    private void setHighlightColor(InfoBox infoBox, Color color)
+    private Color getFlashColor(
+            InfoBox infoBox)
+    {
+        return configManager.getConfiguration(
+                CONFIG_GROUP,
+                getFlashColorConfigKey(
+                        infoBox
+                ),
+                Color.class
+        );
+    }
+
+    private void setHighlightColor(
+            InfoBox infoBox,
+            Color color)
     {
         configManager.setConfiguration(
                 CONFIG_GROUP,
-                getColorConfigKey(infoBox),
+                getHighlightColorConfigKey(
+                        infoBox
+                ),
                 color.getRGB()
         );
     }
 
-    private void removeHighlight(InfoBox infoBox)
+    private void setFlashColor(
+            InfoBox infoBox,
+            Color color)
+    {
+        configManager.setConfiguration(
+                CONFIG_GROUP,
+                getFlashColorConfigKey(
+                        infoBox
+                ),
+                color.getRGB()
+        );
+    }
+
+    private void removeHighlight(
+            InfoBox infoBox)
     {
         configManager.unsetConfiguration(
                 CONFIG_GROUP,
-                getColorConfigKey(infoBox)
+                getHighlightColorConfigKey(
+                        infoBox
+                )
         );
 
-        restoreOriginalImage(infoBox);
+        syncHighlightImage(
+                infoBox
+        );
     }
 
-    private String getColorConfigKey(InfoBox infoBox)
+    private void removeFlashColor(
+            InfoBox infoBox)
     {
-        return "color_" + infoBox.getName();
+        configManager.unsetConfiguration(
+                CONFIG_GROUP,
+                getFlashColorConfigKey(
+                        infoBox
+                )
+        );
+
+        syncHighlightImage(
+                infoBox
+        );
+    }
+
+    private String getHighlightColorConfigKey(
+            InfoBox infoBox)
+    {
+        return "color_"
+                + infoBox.getName();
+    }
+
+    private String getFlashColorConfigKey(
+            InfoBox infoBox)
+    {
+        return "flashColor_"
+                + infoBox.getName();
     }
 }
